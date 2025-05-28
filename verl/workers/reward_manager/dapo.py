@@ -14,13 +14,15 @@
 
 from collections import defaultdict
 
+import inspect
 import torch
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 
+from base import BaseRewardManager, RewardManagerType
 
-class DAPORewardManager:
+class DAPORewardManager(BaseRewardManager):
     """The reward manager."""
 
     def __init__(
@@ -30,17 +32,89 @@ class DAPORewardManager:
         compute_score=None,
         reward_fn_key="data_source",
         max_resp_len=None,
-        overlong_buffer_cfg=None,
+        overlong_buffer_cfg=None, timeout=None, qps=None, max_concurrent_tasks=None
     ) -> None:
+        self.name = 'dapo'
+        self.reward_type = RewardManagerType.DAPO
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = max_resp_len
+        self.timeout = timeout
+        self.qps = qps
+        self.max_concurrent_tasks = max_concurrent_tasks
 
         if self.overlong_buffer_cfg is not None:
             assert self.max_resp_len is not None, f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
+
+    def post_process(self, data: DataProto, scores: list, return_dict: bool = False):
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
+        already_print_data_sources = {}
+
+        for i in range(len(data)):
+            data_item = data[i]  # DataProtoItem
+            result = scores[i]
+            data_dict = self.retrive_data_for_processing(data_item)
+
+            valid_response_length = data_dict["valid_response_length"]
+            data_source = data_dict["data_source"]
+            prompt_str = data_dict["prompt_str"]
+            ground_truth = data_dict["ground_truth"]
+            response_str = self.get_response_str(data_item)
+
+            score: float
+            if isinstance(result, dict):
+                score = result["score"]
+                # Store the information including original reward
+                for key, value in result.items():
+                    reward_extra_info[key].append(value)
+            else:
+                score = result
+
+            reward = score
+
+            if self.overlong_buffer_cfg.enable:
+                overlong_buffer_len = self.overlong_buffer_cfg.len
+                expected_len = self.max_resp_len - overlong_buffer_len
+                exceed_len = valid_response_length - expected_len
+                overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
+                overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
+                reward += overlong_reward
+                if self.overlong_buffer_cfg.log:
+                    reward_extra_info["overlong_reward"].append(overlong_reward)
+                    reward_extra_info["overlong"].append(overlong_reward < 0)
+
+            reward_tensor[i, valid_response_length - 1] = reward
+
+            if data_source not in already_print_data_sources:
+                already_print_data_sources[data_source] = 0
+
+            if already_print_data_sources[data_source] < self.num_examine:
+                already_print_data_sources[data_source] += 1
+                print("[prompt]", prompt_str)
+                print("[response]", response_str)
+                print("[ground_truth]", ground_truth)
+                if isinstance(result, dict):
+                    for key, value in result.items():
+                        print(f"[{key}]", value)
+                else:
+                    print("[score]", score)
+
+        if return_dict:
+            return {
+                "reward_tensor": reward_tensor,
+                "reward_extra_info": reward_extra_info,
+            }
+        else:
+            return reward_tensor
+
+
+    def async_calculate(self, data: DataProto, return_dict = False):
+        scores = self.calculate_reward(data=data)
+        return self.post_process(data=data, scores=scores, return_dict=return_dict)
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         """We will expand this function gradually based on the available datasets"""
@@ -51,6 +125,9 @@ class DAPORewardManager:
                 return {"reward_tensor": data.batch["rm_scores"]}
             else:
                 return data.batch["rm_scores"]
+
+        if inspect.iscoroutinefunction(self.compute_score):
+            return self.async_calculate(data, return_dict=return_dict)
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)

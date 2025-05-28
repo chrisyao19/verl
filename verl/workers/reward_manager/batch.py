@@ -18,16 +18,67 @@ import torch
 
 from verl import DataProto
 
+from base import BaseRewardManager, RewardManagerType
 
-class BatchRewardManager:
+class BatchRewardManager(BaseRewardManager):
     def __init__(self, tokenizer, num_examine, compute_score, reward_fn_key="data_source", **reward_kwargs):
-        self.tokenizer = tokenizer
-        self.num_examine = num_examine
-        self.compute_score = compute_score
-        self.reward_fn_key = reward_fn_key
-        self.reward_kwargs = reward_kwargs
+        super().__init__(
+            name='batch',
+            reward_type=RewardManagerType.BATCH,
+            tokenizer = tokenizer,
+            num_examine = num_examine,
+            compute_score = compute_score,
+            reward_fn_key = reward_fn_key,
+            reward_kwargs = reward_kwargs,
+            qps = None,
+            max_concurrent_tasks = None
+        )
 
-    def verify(self, data):
+    def post_process(self, data: DataProto, scores: list, return_dict: bool = False):
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
+        prompt_ids = data.batch["prompts"]
+        prompt_len = prompt_ids.shape[-1]
+        attention_mask = data.batch["attention_mask"]
+        valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
+        data_sources = data.non_tensor_batch[self.reward_fn_key]
+        rewards = []
+        already_printed = {}
+        for i in range(len(data)):
+            length = valid_response_lengths[i].item()
+            score = scores[i]
+
+            if isinstance(score, dict):
+                reward = score["score"]
+                for key, value in score.items():
+                    reward_extra_info[key].append(value)
+            else:
+                reward = score
+
+            rewards.append(reward)
+            reward_tensor[i, length - 1] = reward
+
+            data_source = data_sources[i]
+            if already_printed.get(data_source, 0) < self.num_examine:
+                response_str = self.tokenizer.decode(data.batch["responses"][i][:length], skip_special_tokens=True)
+                prompt_str = self.tokenizer.decode(data.batch["prompts"][i], skip_special_tokens=True)
+                ground_truth = data[i].non_tensor_batch["reward_model"].get("ground_truth", None)
+                print("[prompt]", prompt_str)
+                print("[response]", response_str)
+                print("[ground_truth]", ground_truth)
+                print("[score]", scores[i])
+                already_printed[data_source] = already_printed.get(data_source, 0) + 1
+
+        data.batch["acc"] = torch.tensor(rewards, dtype=torch.float32, device=prompt_ids.device)
+
+        if return_dict:
+            return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
+        else:
+            return reward_tensor
+
+
+
+    def calculate_reward(self, data: DataProto):
         prompt_ids = data.batch["prompts"]
         response_ids = data.batch["responses"]
         attention_mask = data.batch["attention_mask"]
@@ -64,46 +115,6 @@ class BatchRewardManager:
             else:
                 return data.batch["rm_scores"]
 
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        reward_extra_info = defaultdict(list)
-        prompt_ids = data.batch["prompts"]
-        prompt_len = prompt_ids.shape[-1]
-        attention_mask = data.batch["attention_mask"]
-        valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
-        data_sources = data.non_tensor_batch[self.reward_fn_key]
+        scores = self.calculate_reward(data)
+        return self.post_process(data, scores, return_dict=return_dict)
 
-        scores = self.verify(data)
-        rewards = []
-        already_printed = {}
-
-        for i in range(len(data)):
-            length = valid_response_lengths[i].item()
-            score = scores[i]
-
-            if isinstance(score, dict):
-                reward = score["score"]
-                for key, value in score.items():
-                    reward_extra_info[key].append(value)
-            else:
-                reward = score
-
-            rewards.append(reward)
-            reward_tensor[i, length - 1] = reward
-
-            data_source = data_sources[i]
-            if already_printed.get(data_source, 0) < self.num_examine:
-                response_str = self.tokenizer.decode(data.batch["responses"][i][:length], skip_special_tokens=True)
-                prompt_str = self.tokenizer.decode(data.batch["prompts"][i], skip_special_tokens=True)
-                ground_truth = data[i].non_tensor_batch["reward_model"].get("ground_truth", None)
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
-                print("[score]", scores[i])
-                already_printed[data_source] = already_printed.get(data_source, 0) + 1
-
-        data.batch["acc"] = torch.tensor(rewards, dtype=torch.float32, device=prompt_ids.device)
-
-        if return_dict:
-            return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
-        else:
-            return reward_tensor

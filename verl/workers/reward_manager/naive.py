@@ -14,20 +14,80 @@
 
 from collections import defaultdict
 
+import inspect
 import torch
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
 
+from base import BaseRewardManager, RewardManagerType
 
-class NaiveRewardManager:
+
+class NaiveRewardManager(BaseRewardManager):
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
-        self.tokenizer = tokenizer
-        self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
-        self.compute_score = compute_score or _default_compute_score
-        self.reward_fn_key = reward_fn_key
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", timeout=None, qps=None,
+                 max_concurrent_tasks=None):
+        super().__init__(
+            name="naive",
+            reward_type=RewardManagerType.NAIVE,
+            tokenizer=tokenizer,
+            num_examine=num_examine,
+            compute_score=compute_score or _default_compute_score,
+            reward_fn_key=reward_fn_key,
+            timeout = timeout,
+            qps = qps,
+            max_concurrent_tasks=max_concurrent_tasks
+        )
+
+    def post_process(self, data: DataProto, scores:list, return_dict: bool = False):
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
+        already_print_data_sources = {}
+        for i in range(len(data)):
+            data_item = data[i]  # DataProtoItem
+            data_dict = self.retrive_data_for_processing(data_item)
+
+            valid_response_length = data_dict["valid_response_length"]
+            data_source = data_dict["data_source"]
+            prompt_str= data_dict["prompt_str"]
+            response_str = data_dict["response_str"]
+            ground_truth = data_dict["ground_truth"]
+            score = scores[i]
+            if isinstance(score, dict):
+                reward = score["score"]
+                # Store the information including original reward
+                for key, value in score.items():
+                    reward_extra_info[key].append(value)
+            else:
+                reward = score
+
+            reward_tensor[i, valid_response_length - 1] = reward
+            if data_source not in already_print_data_sources:
+                already_print_data_sources[data_source] = 0
+
+            if already_print_data_sources[data_source] < self.num_examine:
+                already_print_data_sources[data_source] += 1
+                print("[prompt]", prompt_str)
+                print("[response]", response_str)
+                print("[ground_truth]", ground_truth)
+                if isinstance(score, dict):
+                    for key, value in score.items():
+                        print(f"[{key}]", value)
+                else:
+                    print("[score]", score)
+
+        if return_dict:
+            return {
+                "reward_tensor": reward_tensor,
+                "reward_extra_info": reward_extra_info,
+            }
+        else:
+            return reward_tensor
+
+    def async_calculate(self, data: DataProto, return_dict=False):
+        scores = self.calculate_reward(data=data)
+        return self.post_process(data=data, scores=scores, return_dict=return_dict)
 
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
@@ -38,6 +98,9 @@ class NaiveRewardManager:
                 return {"reward_tensor": data.batch["rm_scores"]}
             else:
                 return data.batch["rm_scores"]
+
+        if inspect.iscoroutinefunction(self.compute_score):
+            return self.async_calculate(data, return_dict=return_dict)
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
