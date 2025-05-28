@@ -49,13 +49,6 @@ async def compute_score_with_throttle(
     return result
 
 
-class RewardManagerType(Enum):
-    BASE = 'BASE'
-    NAIVE = 'NAIVE'
-    DAPO = 'DAPO'
-    BATCH = 'BATCH'
-
-
 class BaseRewardManager:
     """
         BaseRewardManager is the base class for all reward managers.
@@ -77,12 +70,10 @@ class BaseRewardManager:
         - `calculate_reward(data_item)`: computes and returns the reward for a single sample.
     """
 
-    def __init__(self, name: str, reward_type: RewardManagerType,
+    def __init__(self,
                  tokenizer: PreTrainedTokenizer, num_examine: int,
                  compute_score: Optional[Callable] = None, reward_fn_key: str = "data_source", timeout: float = None,
                  qps: int = None, max_concurrent_tasks: int = None, **reward_kwargs) -> None:
-        self.name = name
-        self.reward_type = reward_type
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score
@@ -157,10 +148,7 @@ class BaseRewardManager:
 
     def get_response_str(self, data_item):
         data_dict = self.retrive_data_for_processing(data_item)
-        eos_token = self.tokenizer.eos_token
-        return data_dict["response_str"][: -len(eos_token)] \
-                        if self.reward_type == RewardManagerType.DAPO and data_dict["response_str"].endswith(eos_token) \
-                        else data_dict["response_str"]
+        return data_dict["prompt_str"]
 
     def __call__(self, data: DataProto, return_dict: bool = False):
         """To be overridden by subclasses."""

@@ -18,9 +18,9 @@ import inspect
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score import _default_compute_score
+from verl.utils.reward_score import default_compute_score
 
-from base import BaseRewardManager, RewardManagerType
+from base import BaseRewardManager
 
 
 class NaiveRewardManager(BaseRewardManager):
@@ -29,11 +29,9 @@ class NaiveRewardManager(BaseRewardManager):
     def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", timeout=None, qps=None,
                  max_concurrent_tasks=None):
         super().__init__(
-            name="naive",
-            reward_type=RewardManagerType.NAIVE,
             tokenizer=tokenizer,
             num_examine=num_examine,
-            compute_score=compute_score or _default_compute_score,
+            compute_score=compute_score or default_compute_score,
             reward_fn_key=reward_fn_key,
             timeout = timeout,
             qps = qps,

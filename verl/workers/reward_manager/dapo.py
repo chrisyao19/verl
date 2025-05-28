@@ -18,9 +18,9 @@ import inspect
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score import _default_compute_score
+from verl.utils.reward_score import default_compute_score
 
-from base import BaseRewardManager, RewardManagerType
+from base import BaseRewardManager
 
 class DAPORewardManager(BaseRewardManager):
     """The reward manager."""
@@ -34,11 +34,9 @@ class DAPORewardManager(BaseRewardManager):
         max_resp_len=None,
         overlong_buffer_cfg=None, timeout=None, qps=None, max_concurrent_tasks=None
     ) -> None:
-        self.name = 'dapo'
-        self.reward_type = RewardManagerType.DAPO
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
-        self.compute_score = compute_score or _default_compute_score
+        self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = max_resp_len
@@ -111,6 +109,10 @@ class DAPORewardManager(BaseRewardManager):
         else:
             return reward_tensor
 
+    def get_response_str(self, data_item):
+        data_dict = self.retrive_data_for_processing(data_item)
+        eos_token = self.tokenizer.eos_token
+        return data_dict["response_str"][: -len(eos_token)]
 
     def async_calculate(self, data: DataProto, return_dict = False):
         scores = self.calculate_reward(data=data)
