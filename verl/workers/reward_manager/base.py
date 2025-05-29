@@ -23,22 +23,15 @@ async def compute_score_with_throttle(
     semaphore = asyncio.Semaphore(max_concurrent_tasks) if max_concurrent_tasks else None
 
     async def _scoring():
-        try:
-            if interval > 0:
-                await asyncio.sleep(interval)
+        if interval > 0:
+            await asyncio.sleep(interval)
 
-            coro = evaluation_func(data_source, solution_str, ground_truth, extra_info)
+        coro = evaluation_func(data_source, solution_str, ground_truth, extra_info)
 
-            if timeout:
-                return await asyncio.wait_for(coro, timeout=timeout)
-            else:
-                return await coro
-        except asyncio.TimeoutError:
-            print(f"[Timeout] Task timeout")
-            return None
-        except Exception as e:
-            print(f"[Error] Task failed: {e}")
-            return None
+        if timeout:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            return await coro
 
     if semaphore:
         async with semaphore:
@@ -84,39 +77,23 @@ class BaseRewardManager:
         self.max_concurrent_tasks = max_concurrent_tasks
 
     def calculate_reward(self, data: DataProto):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        async def run_all():
+            tasks = []
+            for i in range(len(data)):
+                data_item = data[i]  # DataProtoItem
+                data_dict = self.retrive_data_for_processing(data_item)
+                task = compute_score_with_throttle(evaluation_func=self.compute_score,
+                                                   data_source=data_dict["data_source"],
+                                                   solution_str=self.get_response_str(data_item),
+                                                   ground_truth=data_dict["ground_truth"],
+                                                   extra_info=data_dict["extra_info"], timeout=self.timeout,
+                                                   qps=self.qps,
+                                                   max_concurrent_tasks=self.max_concurrent_tasks)
+                tasks.append(task)
 
-        response_ids = data.batch["responses"]
-        sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+            return await asyncio.gather(*tasks)
 
-        try:
-            async def run_all():
-                tasks = []
-                for i in range(len(data)):
-                    data_item = data[i]  # DataProtoItem
-                    data_dict = self.retrive_data_for_processing(data_item)
-                    task = compute_score_with_throttle(evaluation_func=self.compute_score,
-                                                       data_source=data_dict["data_source"],
-                                                       solution_str=self.get_response_str(data_item),
-                                                       ground_truth=data_dict["ground_truth"],
-                                                       extra_info=data_dict["extra_info"], timeout=self.timeout,
-                                                       qps=self.qps,
-                                                       max_concurrent_tasks=self.max_concurrent_tasks)
-                    tasks.append(task)
-
-                return await asyncio.gather(*tasks)
-
-            scores = loop.run_until_complete(run_all())
-        except asyncio.TimeoutError:
-            print("[Timeout] Global reward scoring timed out. Setting all as 0.")
-            scores = [0.0 for _ in range(len(sequences_str))]
-        except Exception as e:
-            print(f"[Error] Unexpected error during scoring. Setting all as 0. {e}")
-            scores = [0.0 for _ in range(len(sequences_str))]
-        finally:
-            loop.close()
-        return scores
+        return asyncio.run(run_all())
 
     def post_process(self, data: DataProto, scores: list, return_dict: bool = False):
         """To be overridden by subclasses."""
